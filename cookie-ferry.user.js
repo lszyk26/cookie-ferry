@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Cookie 摆渡车
 // @namespace    https://0lt.top/cookie-ferry
-// @version      1.1.0
-// @description  跨浏览器搬运登录态：cookie（含 HttpOnly）+ localStorage/sessionStorage，双模式导出导入
+// @version      1.2.0
+// @description  跨浏览器搬运登录态：cookie（含 HttpOnly）+ localStorage/sessionStorage，支持文件导出导入与粘贴双通道
 // @author       -
 // @match        *://*/*
 // @grant        GM_cookie
@@ -22,7 +22,8 @@
 
   var HAS_GM_COOKIE = (typeof GM_cookie !== 'undefined') && GM_cookie && typeof GM_cookie.list === 'function';
   var HAS_MENU = (typeof GM_registerMenuCommand === 'function');
-  var VERSION = '1.1.0';
+  var VERSION = '1.2.0';
+  var MAX_ITEM = 131072; // 单个键超过 128KB 视为缓存，不搬运
 
   /* ---------------- cookie 层 ---------------- */
 
@@ -103,10 +104,8 @@
 
   /* ---------------- storage 层 ---------------- */
 
-  var MAX_ITEM = 131072; // 单个键超过 128KB 视为缓存，不搬运
-
   function collectStorageAll() {
-    var items = [], skipped = 0;
+    var rows = [], skipped = 0;
     [['l', localStorage], ['s', sessionStorage]].forEach(function (pair) {
       var tag = pair[0], st = pair[1];
       try {
@@ -116,11 +115,11 @@
           var v = st.getItem(k);
           if (v == null) continue;
           if (v.length > MAX_ITEM) { skipped++; continue; }
-          items.push({ k: k, v: v, t: tag });
+          rows.push({ k: k, v: v, t: tag });
         }
       } catch (e) { /* 隐私模式可能抛错 */ }
     });
-    return { items: items, skipped: skipped };
+    return { items: rows, skipped: skipped };
   }
 
   /* ---------------- 序列化 ---------------- */
@@ -146,6 +145,12 @@
     }
     if (!obj || (!Array.isArray(obj.cookies) && !Array.isArray(obj.items))) throw new Error('格式不认识');
     return obj;
+  }
+
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  function stamp() {
+    var d = new Date();
+    return d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate()) + '-' + pad2(d.getHours()) + pad2(d.getMinutes());
   }
 
   /* ---------------- 样式 ---------------- */
@@ -215,6 +220,7 @@
     '.btn-pri:disabled{background:#7a4a24;border-color:#7a4a24;color:#cbb6a4}',
 
     '.hint{margin:9px 0 0;font-size:11px;line-height:1.6;color:#7e7e7e}',
+    '.fileline{margin:8px 0 0;font-size:11px;color:#8a8a8a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.list{margin-top:10px;display:flex;flex-direction:column;gap:6px;max-height:186px;overflow:auto}',
     '.row{display:flex;align-items:flex-start;gap:8px;padding:7px 9px;border:1px solid rgba(255,255,255,.08);',
     'border-radius:9px;background:rgba(255,255,255,.03)}',
@@ -264,19 +270,22 @@
     '<textarea class="ta ta-out" readonly spellcheck="false" placeholder="点下方「读取当前站点」"></textarea>',
     '<div class="actions">',
     '<button class="btn btn-pri do-read">读取当前站点</button>',
+    '</div>',
+    '<div class="actions">',
+    '<button class="btn do-download">下载文件</button>',
     '<button class="btn copy-json">复制 JSON</button>',
-    '<button class="btn copy-b64">复制短码</button>',
     '</div>',
     '<p class="hint"></p>',
     '</div>',
 
     '<div class="pane pane-1" hidden>',
-    '<textarea class="ta ta-in" spellcheck="false" placeholder="粘贴另一个浏览器导出的 JSON 或短码"></textarea>',
+    '<textarea class="ta ta-in" spellcheck="false" placeholder="粘贴另一个浏览器导出的 JSON（小数据用），大数据请点「选择文件」"></textarea>',
     '<div class="actions">',
-    '<button class="btn do-analyze">解析</button>',
+    '<button class="btn do-pick">选择文件</button>',
+    '<button class="btn do-analyze">解析粘贴</button>',
     '<button class="btn btn-pri do-write" disabled>写入</button>',
-    '<button class="btn do-clear">清空</button>',
     '</div>',
+    '<p class="fileline"></p>',
     '<div class="list"></div>',
     '<div class="actions"><button class="btn do-reload" hidden>刷新页面</button></div>',
     '</div>',
@@ -307,15 +316,21 @@
   var hostChip = $('.host'), logEl = $('.log'), toastEl = $('.toast');
   var statsEl = $('.stats'), taOut = $('.ta-out'), taIn = $('.ta-in');
   var listEl = $('.list'), writeBtn = $('.do-write'), reloadBtn = $('.do-reload');
-  var hintEl = $('.hint'), segEl = $('.seg');
+  var hintEl = $('.hint'), segEl = $('.seg'), fileLine = $('.fileline');
+
+  var fileInput = document.createElement('input');
+  fileInput.type = 'file';
+  fileInput.accept = '.json,.txt,application/json,text/plain';
+  fileInput.style.display = 'none';
+  wrap.appendChild(fileInput);
 
   var mode = 'cookie';
   var items = [];
   var toastTimer = 0;
 
   var HINT = {
-    cookie: '在已登录的浏览器里点「读取」，把结果复制到另一个浏览器粘贴。cookie 里没有登录凭证时，切到「本地存储」。',
-    storage: '会搬运该站点全部 localStorage / sessionStorage，写入时覆盖目标浏览器同名键。单项超过 128KB 的缓存自动跳过。'
+    cookie: '推荐：点「下载文件」，到另一个浏览器点「选择文件」。cookie 里没有登录凭证时，切到「本地存储」。',
+    storage: '推荐：点「下载文件」，到另一个浏览器点「选择文件」。会覆盖目标浏览器同名键，超过 128KB 的缓存自动跳过。'
   };
 
   function log(msg) { logEl.textContent = msg; logEl.title = msg; }
@@ -342,6 +357,26 @@
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(function () { toast(msg); }, function () { fallbackCopy(text, msg); });
     } else fallbackCopy(text, msg);
+  }
+
+  function download(text) {
+    if (!text) { toast('先读取'); return; }
+    var name = 'cookie-ferry-' + location.hostname + '-' + stamp() + '.json';
+    try {
+      var blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 5000);
+      log('已下载 ' + name + '，切到另一个浏览器点「选择文件」');
+      toast('开始下载');
+    } catch (e) {
+      log('下载失败：' + e.message + '，请改用复制');
+    }
   }
 
   function setMode(m) {
@@ -392,9 +427,9 @@
       taOut.value = data.length
         ? JSON.stringify({ app: 'cookie-ferry', v: 1, ts: Date.now(), host: location.host, store: 'cookie', cookies: data })
         : '';
-      if (!data.length) log('没有 cookie，试试「本地存储」模式');
+      if (!data.length) log('没有 cookie，切到「本地存储」模式');
       else if (ho === 0 && se === 0) log('读到 ' + data.length + ' 条，但没有 HttpOnly 会话 cookie，登录态可能不在 cookie 里');
-      else log('读取完成，可以复制了');
+      else log('读取完成，共 ' + data.length + ' 条');
     } catch (e) { log('读取失败：' + e.message); }
   }
 
@@ -460,6 +495,7 @@
         var val = it.v == null ? '' : String(it.v);
         return {
           label: it.k,
+          kind: 'storage',
           sub: (tag === 's' ? 'sessionStorage' : 'localStorage') + ' · ' + val.length + ' 字符',
           run: function () { st.setItem(it.k, val); }
         };
@@ -474,6 +510,7 @@
       if (c.session) flags.push('会话');
       return {
         label: c.name,
+        kind: 'cookie',
         sub: flags.join(' · '),
         error: built.error || null,
         run: built.details ? function () { return setCookie(built.details); } : null,
@@ -482,26 +519,24 @@
     });
   }
 
-  function doAnalyze() {
-    var raw = taIn.value.trim();
-    if (!raw) { log('先粘贴内容'); return; }
+  function analyzeText(text, from) {
     var pkg;
-    try { pkg = parseInput(raw); } catch (e) { log('解析失败：' + e.message); return; }
+    try { pkg = parseInput(text); } catch (e) { log('解析失败：' + e.message); return; }
     items = buildItems(pkg);
     renderItems();
     updateWriteBtn();
     reloadBtn.hidden = true;
     var ok = items.filter(function (i) { return i.run; }).length;
-    log((pkg.host ? '来自 ' + pkg.host + ' ' : '') + '解析到 ' + items.length + ' 条，可写入 ' + ok + ' 条'
+    log((from ? '[' + from + '] ' : '') + '解析到 ' + items.length + ' 条，可写入 ' + ok + ' 条'
       + (pkg.store === 'storage' ? '（本地存储）' : '（cookie）'));
     if (ok === 0) toast('没有可写入的条目');
+    else if (items.length === ok) toast('解析完成，点「写入」');
   }
 
   async function doWrite() {
     var pending = items.filter(function (i) { return i.run && !i.status; });
     if (!pending.length) return;
-    var isStorage = !!pending[0].label && pending[0].run.length >= 0 && !pending[0]._name;
-    if (!isStorage && !HAS_GM_COOKIE) {
+    if (pending[0].kind !== 'storage' && !HAS_GM_COOKIE) {
       log('当前管理器不支持 GM_cookie，无法写入 cookie');
       return;
     }
@@ -517,7 +552,7 @@
     reloadBtn.hidden = ok === 0;
 
     try {
-      if (isStorage) {
+      if (pending[0].kind === 'storage') {
         var now = new Set(collectStorageAll().items.map(function (x) { return x.k; }));
         var hit = pending.filter(function (p) { return now.has(p.label); }).length;
         log('写入完成：成功 ' + ok + '，失败 ' + fail + '；回读匹配 ' + hit + '/' + pending.length);
@@ -538,6 +573,8 @@
   launch.addEventListener('click', function () { openPanel(); });
   $('.close').addEventListener('click', closePanel);
   $('.do-read').addEventListener('click', doRead);
+  $('.do-download').addEventListener('click', function () { download(taOut.value); });
+  $('.copy-json').addEventListener('click', function () { copy(taOut.value, 'JSON 已复制'); });
 
   Array.prototype.forEach.call(segEl.querySelectorAll('button'), function (b) {
     b.addEventListener('click', function () {
@@ -546,18 +583,29 @@
     });
   });
 
-  $('.copy-json').addEventListener('click', function () { copy(taOut.value, 'JSON 已复制'); });
-  $('.copy-b64').addEventListener('click', function () {
-    if (!taOut.value) { toast('先读取'); return; }
-    try { copy(b64encode(taOut.value), '短码已复制'); } catch (e) { toast('编码失败'); }
+  $('.do-pick').addEventListener('click', function () { fileInput.value = ''; fileInput.click(); });
+  fileInput.addEventListener('change', async function () {
+    var f = fileInput.files && fileInput.files[0];
+    if (!f) return;
+    log('读取文件…');
+    try {
+      var text = await f.text();
+      taIn.value = '';                       // 不把长文本塞进 textarea，避免卡顿
+      fileLine.textContent = '已载入：' + f.name + '（' + Math.max(1, Math.round(f.size / 1024)) + ' KB）';
+      analyzeText(text, f.name);
+    } catch (e) {
+      log('读取失败：' + e.message);
+    }
+    fileInput.value = '';
   });
 
-  $('.do-analyze').addEventListener('click', doAnalyze);
-  writeBtn.addEventListener('click', doWrite);
-  $('.do-clear').addEventListener('click', function () {
-    taIn.value = ''; items = []; listEl.textContent = ''; updateWriteBtn();
-    reloadBtn.hidden = true; log('已清空');
+  $('.do-analyze').addEventListener('click', function () {
+    var raw = taIn.value.trim();
+    if (!raw) { log('先粘贴内容，或点「选择文件」'); return; }
+    fileLine.textContent = '';
+    analyzeText(raw, '粘贴');
   });
+  writeBtn.addEventListener('click', doWrite);
   reloadBtn.addEventListener('click', function () { location.reload(); });
 
   Array.prototype.forEach.call(wrap.querySelectorAll('.tab'), function (btn) {
@@ -569,7 +617,6 @@
       });
       $('.pane-0').hidden = i !== '0';
       $('.pane-1').hidden = i !== '1';
-      if (i === '1') taIn.focus();
     });
   });
 
