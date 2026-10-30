@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Cookie 摆渡车
 // @namespace    https://0lt.top/cookie-ferry
-// @version      1.3.0
-// @description  跨浏览器搬运登录态：A 生成 6 位验证码，B 输入即登录；也支持文件与粘贴
+// @version      1.4.0
+// @description  跨浏览器搬运登录态：A 点一下拿 6 位验证码，B 输入即登录；备用文件/粘贴收进折叠区
 // @author       -
 // @match        *://*/*
 // @grant        GM_cookie
@@ -24,11 +24,11 @@
 
   var HAS_GM_COOKIE = (typeof GM_cookie !== 'undefined') && GM_cookie && typeof GM_cookie.list === 'function';
   var HAS_MENU = (typeof GM_registerMenuCommand === 'function');
-  var VERSION = '1.3.0';
+  var VERSION = '1.4.0';
   var API = 'https://0lt.top/api/ferry/';
-  var MAX_ITEM = 131072; // 单个键超过 128KB 视为缓存，不搬运
+  var MAX_ITEM = 131072;
 
-  /* ---------------- cookie 层 ---------------- */
+  /* ---------------- cookie ---------------- */
 
   function callGM(fn, details) {
     return new Promise(function (resolve, reject) {
@@ -66,7 +66,7 @@
           var k = c.name + '|' + (c.domain || '') + '|' + (c.path || '');
           if (!seen.has(k)) seen.set(k, c);
         });
-      } catch (e) { /* 忽略单次失败 */ }
+      } catch (e) { /* 忽略 */ }
     }
     return Array.from(seen.values());
   }
@@ -105,7 +105,7 @@
     return { details: det };
   }
 
-  /* ---------------- storage 层 ---------------- */
+  /* ---------------- storage ---------------- */
 
   function collectStorageAll() {
     var rows = [], skipped = 0;
@@ -120,7 +120,7 @@
           if (v.length > MAX_ITEM) { skipped++; continue; }
           rows.push({ k: k, v: v, t: tag });
         }
-      } catch (e) { /* 隐私模式可能抛错 */ }
+      } catch (e) { /* 忽略 */ }
     });
     return { items: rows, skipped: skipped };
   }
@@ -148,16 +148,13 @@
           return;
         } catch (e) { /* 退回 fetch */ }
       }
-      fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: payload
-      }).then(function (r) {
-        return r.json().then(function (j) {
-          if (!r.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
-          return j;
-        });
-      }).then(resolve, function (e) { reject(new Error(e.message || '网络错误')); });
+      fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload })
+        .then(function (r) {
+          return r.json().then(function (j) {
+            if (!r.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
+            return j;
+          });
+        }).then(resolve, function (e) { reject(new Error(e.message || '网络错误')); });
     });
   }
 
@@ -236,7 +233,7 @@
     '.seg button.is-on{background:rgba(255,138,61,.16);border-color:rgba(255,138,61,.55);color:#ffb37a;font-weight:600}',
 
     '.stats{font-size:11.5px;color:#9a9a9a;margin:0 0 8px}',
-    '.ta{width:100%;min-height:78px;max-height:200px;resize:vertical;border:1px solid rgba(255,255,255,.1);border-radius:11px;',
+    '.ta{width:100%;min-height:74px;max-height:190px;resize:vertical;border:1px solid rgba(255,255,255,.1);border-radius:11px;',
     'background:rgba(0,0,0,.34);color:#e8e8e8;font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;',
     'padding:9px 10px;outline:none;word-break:break-all;transition:border-color .2s,box-shadow .2s}',
     '.ta:focus{border-color:rgba(255,138,61,.85);box-shadow:0 0 0 3px rgba(255,138,61,.16)}',
@@ -245,9 +242,9 @@
     '.code-in{flex:1;min-width:0;height:44px;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(0,0,0,.36);',
     'color:#f6f6f6;font:17px/1 ui-monospace,Menlo,monospace;letter-spacing:.3em;text-indent:.3em;text-align:center;padding:0 8px;outline:none;',
     'transition:border-color .2s,box-shadow .2s}',
-    '.code-in::placeholder{letter-spacing:.05em;text-indent:0;color:#6e6e6e;font-size:12.5px;letter-spacing:0}',
+    '.code-in::placeholder{letter-spacing:.05em;text-indent:0;color:#6e6e6e;font-size:12.5px}',
     '.code-in:focus{border-color:rgba(255,138,61,.85);box-shadow:0 0 0 3px rgba(255,138,61,.16)}',
-    '.coderow .btn{flex:none;min-width:104px}',
+    '.coderow .btn{flex:none;min-width:78px}',
 
     '.codebox{margin-top:10px;border:1px solid rgba(255,138,61,.3);background:rgba(255,138,61,.07);border-radius:12px;',
     'padding:12px 12px 10px;text-align:center;display:none}',
@@ -267,11 +264,18 @@
     '.btn-pri:hover{background:#ff9a56;border-color:#ff9a56}',
     '.btn-pri:disabled{background:#7a4a24;border-color:#7a4a24;color:#cbb6a4}',
 
-    '.hint{margin:9px 0 0;font-size:11px;line-height:1.6;color:#7e7e7e}',
-    '.sep{margin:14px 0 8px;padding-top:11px;border-top:1px solid rgba(255,255,255,.07);display:flex;align-items:center;gap:8px;',
-    'font-size:11px;color:#6e6e6e}',
+    '.minilink{display:inline-flex;align-items:center;gap:5px;margin-top:10px;border:none;background:transparent;color:#8a8a8a;',
+    'font:11px/1 inherit;font-family:inherit;padding:6px 0;cursor:pointer;transition:color .18s}',
+    '.minilink:hover{color:#ffb37a}',
+    '.minilink svg{width:11px;height:11px;stroke:currentColor;stroke-width:2;fill:none;stroke-linecap:round;',
+    'transition:transform .22s cubic-bezier(.32,.72,0,1)}',
+    '.minilink.on svg{transform:rotate(90deg)}',
+    '.extra{display:none}',
+    '.extra.on{display:block;animation:cfpop .24s cubic-bezier(.32,.72,0,1)}',
+
+    '.hint{margin:8px 0 0;font-size:11px;line-height:1.6;color:#7e7e7e}',
     '.fileline{margin:8px 0 0;font-size:11px;color:#8a8a8a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-    '.list{margin-top:10px;display:flex;flex-direction:column;gap:6px;max-height:186px;overflow:auto}',
+    '.list{margin-top:10px;display:flex;flex-direction:column;gap:6px;max-height:172px;overflow:auto}',
     '.row{display:flex;align-items:flex-start;gap:8px;padding:7px 9px;border:1px solid rgba(255,255,255,.08);',
     'border-radius:9px;background:rgba(255,255,255,.03)}',
     '.row-main{min-width:0;flex:1}',
@@ -293,8 +297,11 @@
     '@media (pointer:coarse){',
     '.launch,.panel{-webkit-backdrop-filter:none;backdrop-filter:none;background:rgba(16,16,16,.96)}',
     '.btn{min-height:42px}.tab{padding:10px 0}.iconbtn{width:36px;height:36px}.seg button{min-height:38px}}',
-    '@media (prefers-reduced-motion: reduce){.panel.on{animation:none}.codebox.on{animation:none}.ind{transition:none}.btn,.launch{transition:none}}'
+    '@media (prefers-reduced-motion: reduce){.panel.on{animation:none}.codebox.on{animation:none}.extra.on{animation:none}',
+    '.ind{transition:none}.btn,.launch{transition:none}}'
   ].join('\n');
+
+  var CHEV = '<svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>';
 
   var HTML = [
     '<button class="launch" aria-label="打开 Cookie 摆渡车" title="Cookie 摆渡车">',
@@ -312,30 +319,35 @@
     '<button class="tab" data-tab="1">导入</button></div>',
 
     '<div class="body">',
+
+    /* 导出 */
+    '<div class="pane pane-0">',
     '<div class="seg"><button data-mode="cookie" class="is-on">Cookie</button>',
     '<button data-mode="storage">本地存储</button></div>',
-
-    '<div class="pane pane-0">',
     '<div class="stats">尚未读取</div>',
-    '<div class="actions"><button class="btn btn-pri do-read">读取当前站点</button></div>',
     '<div class="actions"><button class="btn btn-pri do-gen">生成验证码</button></div>',
     '<div class="codebox"><div class="codeval"></div><div class="codetip"></div></div>',
+    '<button class="minilink" data-extra="exp">' + CHEV + '其他方式（下载文件 / 复制文本）</button>',
+    '<div class="extra" data-body="exp">',
     '<div class="actions">',
     '<button class="btn do-download">下载文件</button>',
     '<button class="btn copy-json">复制 JSON</button>',
     '</div>',
+    '</div>',
     '<p class="hint"></p>',
     '</div>',
 
+    /* 导入 */
     '<div class="pane pane-1" hidden>',
     '<div class="coderow">',
     '<input class="code-in" inputmode="numeric" autocomplete="off" maxlength="6" placeholder="输入 6 位验证码">',
-    '<button class="btn btn-pri do-fetch">获取并写入</button>',
+    '<button class="btn btn-pri do-fetch">获取</button>',
     '</div>',
     '<p class="fileline"></p>',
     '<div class="list"></div>',
     '<div class="actions"><button class="btn do-reload" hidden>刷新页面</button></div>',
-    '<p class="sep">或者用文件 / 粘贴</p>',
+    '<button class="minilink" data-extra="imp">' + CHEV + '其他方式（文件 / 粘贴）</button>',
+    '<div class="extra" data-body="imp">',
     '<textarea class="ta ta-in" spellcheck="false" placeholder="粘贴另一个浏览器导出的 JSON"></textarea>',
     '<div class="actions">',
     '<button class="btn do-pick">选择文件</button>',
@@ -345,6 +357,7 @@
     '</div>',
     '</div>',
 
+    '</div>',
     '<div class="foot"><span class="log">就绪</span></div>',
     '</section>',
 
@@ -385,9 +398,10 @@
   var toastTimer = 0;
   var codeTimer = 0;
   var busy = false;
+  var payloadText = '';
 
   var HINT = {
-    cookie: '读取后点「生成验证码」，到另一个浏览器输入这 6 位数字即可，验证码 5 分钟有效、取用一次即焚。',
+    cookie: '点「生成验证码」，到另一个浏览器输入这 6 位数字就行。5 分钟有效、取用一次即焚。',
     storage: '会覆盖目标浏览器同名键，超过 128KB 的缓存自动跳过。验证码同样 5 分钟、一次即焚。'
   };
 
@@ -437,8 +451,8 @@
     var tick = function () {
       var left = Math.max(0, Math.round(exp - Date.now() / 1000));
       codeTip.textContent = left > 0
-        ? ('剩 ' + Math.floor(left / 60) + ':' + pad2(left % 60) + '，验证码取用一次即焚')
-        : '已过期，请重新点「生成验证码」';
+        ? ('剩 ' + Math.floor(left / 60) + ':' + pad2(left % 60) + '，取用一次即焚')
+        : '已过期，重新点「生成验证码」';
       if (left <= 0) clearInterval(codeTimer);
     };
     tick();
@@ -452,9 +466,9 @@
     });
     hintEl.textContent = HINT[m];
     statsEl.textContent = '尚未读取';
+    payloadText = '';
     codeBox.classList.remove('on');
     clearInterval(codeTimer);
-    items = []; listEl.textContent = ''; updateWriteBtn(); reloadBtn.hidden = true;
     doRead();
   }
 
@@ -470,8 +484,6 @@
   function closePanel() { panel.classList.remove('on'); }
 
   /* ---------------- 导出 ---------------- */
-
-  var payloadText = '';
 
   async function doRead() {
     hintEl.textContent = HINT[mode];
@@ -501,7 +513,7 @@
         : '';
       if (!data.length) log('没有 cookie，切到「本地存储」模式');
       else if (ho === 0 && se === 0) log('读到 ' + data.length + ' 条，但没有 HttpOnly 会话 cookie，登录态可能不在 cookie 里');
-      else log('读取完成，共 ' + data.length + ' 条，可以生成验证码');
+      else log('读取完成，共 ' + data.length + ' 条');
     } catch (e) { log('读取失败：' + e.message); }
   }
 
@@ -523,17 +535,17 @@
     payloadText = JSON.stringify({
       app: 'cookie-ferry', v: 1, ts: Date.now(), host: location.host, store: 'storage', items: data
     });
-    log('读取完成，共 ' + data.length + ' 项，可以生成验证码');
+    log('读取完成，共 ' + data.length + ' 项');
   }
 
   async function doGen() {
-    if (!payloadText) { log('先点「读取当前站点」'); toast('先读取'); return; }
     if (busy) return;
     busy = true;
-    log('上传中…');
     try {
-      var pkg = JSON.parse(payloadText);
-      var r = await apiPost('put', { data: pkg });
+      if (!payloadText) await doRead();        // 没读过就先读，省掉一个按钮
+      if (!payloadText) { toast('没有可导出的数据'); busy = false; return; }
+      log('上传中…');
+      var r = await apiPost('put', { data: JSON.parse(payloadText) });
       if (!r.code) throw new Error('服务端未返回验证码');
       codeVal.textContent = r.code;
       codeBox.classList.add('on');
@@ -667,13 +679,13 @@
     if (busy) return;
     busy = true;
     fetchBtn.disabled = true;
-    log('按验证码取回数据…');
+    log('按验证码取回…');
     try {
-      var data = await apiPost('get', { code: code });
-      if (!data.data) throw new Error('没取到数据');
+      var res = await apiPost('get', { code: code });
+      if (!res.data) throw new Error('没取到数据');
       fileLine.textContent = '已用验证码 ' + code + ' 取回';
       taIn.value = '';
-      var ok = analyzeText(JSON.stringify(data.data), '验证码');
+      var ok = analyzeText(JSON.stringify(res.data), '验证码');
       if (ok) {
         await doWrite();
         codeIn.value = '';
@@ -690,7 +702,6 @@
 
   launch.addEventListener('click', function () { openPanel(); });
   $('.close').addEventListener('click', closePanel);
-  $('.do-read').addEventListener('click', doRead);
   $('.do-gen').addEventListener('click', doGen);
   $('.do-download').addEventListener('click', function () { download(payloadText); });
   $('.copy-json').addEventListener('click', function () { copy(payloadText, 'JSON 已复制'); });
@@ -702,10 +713,20 @@
     });
   });
 
+  // 折叠区
+  Array.prototype.forEach.call(wrap.querySelectorAll('.minilink'), function (link) {
+    link.addEventListener('click', function () {
+      var key = link.dataset.extra;
+      var body = wrap.querySelector('.extra[data-body="' + key + '"]');
+      var on = body.classList.toggle('on');
+      link.classList.toggle('on', on);
+    });
+  });
+
   codeIn.addEventListener('input', function () {
     var v = (codeIn.value || '').replace(/\D/g, '').slice(0, 6);
     if (codeIn.value !== v) codeIn.value = v;
-    if (v.length === 6) doFetchCode();        // 满 6 位自动取回
+    if (v.length === 6) doFetchCode();
   });
   codeIn.addEventListener('keydown', function (e) {
     if (e.key === 'Enter') { e.preventDefault(); doFetchCode(); }
