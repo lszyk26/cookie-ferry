@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Cookie 摆渡车
 // @namespace    https://0lt.top/cookie-ferry
-// @version      1.0.0
-// @description  跨浏览器搬运登录态：A 浏览器导出全量 cookie（含 HttpOnly），B 浏览器一键写入。通用，任意站点可用
+// @version      1.1.0
+// @description  跨浏览器搬运登录态：cookie（含 HttpOnly）+ localStorage/sessionStorage，双模式导出导入
 // @author       -
 // @match        *://*/*
 // @grant        GM_cookie
@@ -22,10 +22,10 @@
 
   var HAS_GM_COOKIE = (typeof GM_cookie !== 'undefined') && GM_cookie && typeof GM_cookie.list === 'function';
   var HAS_MENU = (typeof GM_registerMenuCommand === 'function');
+  var VERSION = '1.1.0';
 
-  /* ---------------- 数据层 ---------------- */
+  /* ---------------- cookie 层 ---------------- */
 
-  // 兼容各版本回调参数顺序
   function callGM(fn, details) {
     return new Promise(function (resolve, reject) {
       try {
@@ -38,25 +38,17 @@
       } catch (e) { reject(e); }
     });
   }
+  function listCookies(d) { return callGM(GM_cookie.list, d); }
+  function setCookie(d) { return callGM(GM_cookie.set, d); }
 
-  function listCookies(details) { return callGM(GM_cookie.list, details); }
-  function setCookie(details) { return callGM(GM_cookie.set, details); }
-
-  // 读取当前站点 cookie（正常路径拿全量含 HttpOnly）
   async function collectCookies() {
     if (!HAS_GM_COOKIE) {
       return document.cookie.split(/;\s*/).filter(Boolean).map(function (pair) {
         var i = pair.indexOf('=');
         return {
-          name: pair.slice(0, i),
-          value: pair.slice(i + 1),
-          domain: location.hostname,
-          path: '/',
-          secure: location.protocol === 'https:',
-          httpOnly: false,
-          sameSite: 'unspecified',
-          session: true,
-          hostOnly: true
+          name: pair.slice(0, i), value: pair.slice(i + 1), domain: location.hostname,
+          path: '/', secure: location.protocol === 'https:', httpOnly: false,
+          sameSite: 'unspecified', session: true, hostOnly: true
         };
       });
     }
@@ -70,12 +62,11 @@
           var k = c.name + '|' + (c.domain || '') + '|' + (c.path || '');
           if (!seen.has(k)) seen.set(k, c);
         });
-      } catch (e) { /* 单次查询失败不影响其它 */ }
+      } catch (e) { /* 忽略单次失败 */ }
     }
     return Array.from(seen.values());
   }
 
-  // 把导出的 cookie 对象转换成 GM_cookie.set 需要的 details
   function buildSetDetails(c) {
     if (!c || !c.name) return { error: '缺少 name' };
     var host = location.hostname;
@@ -88,25 +79,18 @@
       url: (secure ? 'https:' : 'http:') + '//' + host + path,
       name: c.name,
       value: c.value == null ? '' : String(c.value),
-      path: path,
-      secure: secure,
-      httpOnly: !!c.httpOnly
+      path: path, secure: secure, httpOnly: !!c.httpOnly
     };
     if (!c.hostOnly) det.domain = d;
 
     var ss = c.sameSite;
     if (ss && ss !== 'unspecified') {
       if (ss === 'no_restriction' || ss === 'none') {
-        det.sameSite = 'no_restriction';
-        det.secure = true;
-        det.url = 'https://' + host + path;
-      } else {
-        det.sameSite = ss;
-      }
+        det.sameSite = 'no_restriction'; det.secure = true; det.url = 'https://' + host + path;
+      } else { det.sameSite = ss; }
     }
     if (!c.session && c.expirationDate) det.expirationDate = c.expirationDate;
 
-    // 前缀规则（写错浏览器会直接拒收）
     if (/^__Host-/i.test(det.name)) {
       det.secure = true; det.path = '/'; det.url = 'https://' + host + '/'; delete det.domain;
     }
@@ -116,6 +100,30 @@
     if (det.value.length > 4096) return { error: '值超过 4096 字节' };
     return { details: det };
   }
+
+  /* ---------------- storage 层 ---------------- */
+
+  var MAX_ITEM = 131072; // 单个键超过 128KB 视为缓存，不搬运
+
+  function collectStorageAll() {
+    var items = [], skipped = 0;
+    [['l', localStorage], ['s', sessionStorage]].forEach(function (pair) {
+      var tag = pair[0], st = pair[1];
+      try {
+        for (var i = 0; i < st.length; i++) {
+          var k = st.key(i);
+          if (k == null) continue;
+          var v = st.getItem(k);
+          if (v == null) continue;
+          if (v.length > MAX_ITEM) { skipped++; continue; }
+          items.push({ k: k, v: v, t: tag });
+        }
+      } catch (e) { /* 隐私模式可能抛错 */ }
+    });
+    return { items: items, skipped: skipped };
+  }
+
+  /* ---------------- 序列化 ---------------- */
 
   function b64encode(str) {
     var bytes = new TextEncoder().encode(str), bin = '';
@@ -131,17 +139,16 @@
     var s = String(raw || '').trim();
     if (!s) throw new Error('内容为空');
     var obj;
-    if (s.charAt(0) === '{') {
-      obj = JSON.parse(s);
-    } else {
+    if (s.charAt(0) === '{') obj = JSON.parse(s);
+    else {
       try { obj = JSON.parse(b64decode(s.replace(/\s+/g, ''))); }
       catch (e) { throw new Error('既不是 JSON，也不是有效短码'); }
     }
-    if (!obj || !Array.isArray(obj.cookies)) throw new Error('缺少 cookies 数组');
+    if (!obj || (!Array.isArray(obj.cookies) && !Array.isArray(obj.items))) throw new Error('格式不认识');
     return obj;
   }
 
-  /* ---------------- 样式（Shadow DOM 隔离） ---------------- */
+  /* ---------------- 样式 ---------------- */
 
   var CSS = [
     ':host{all:initial}',
@@ -168,7 +175,7 @@
     '.head{display:flex;align-items:center;gap:8px;padding:12px 12px 10px}',
     '.title{font-size:13.5px;font-weight:600}',
     '.ver{font-size:10.5px;color:#7e7e7e;font-weight:400}',
-    '.host{margin-left:auto;max-width:44%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:#b9b9b9;',
+    '.host{margin-left:auto;max-width:42%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:#b9b9b9;',
     'background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.08);border-radius:999px;padding:2px 8px}',
     '.iconbtn{width:28px;height:28px;flex:none;display:grid;place-items:center;border:none;background:transparent;border-radius:8px;cursor:pointer;padding:0}',
     '.iconbtn:hover{background:rgba(255,255,255,.08)}',
@@ -184,8 +191,13 @@
     '.tab.is-on{color:#f6f6f6;font-weight:600}',
 
     '.body{padding:0 12px 12px;overflow:auto;overscroll-behavior:contain}',
+    '.seg{display:flex;gap:6px;margin:0 0 10px}',
+    '.seg button{flex:1;min-height:30px;border-radius:9px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);',
+    'color:#b9b9b9;font:12px/1 inherit;font-family:inherit;cursor:pointer;transition:background .18s,color .18s,border-color .18s}',
+    '.seg button.is-on{background:rgba(255,138,61,.16);border-color:rgba(255,138,61,.55);color:#ffb37a;font-weight:600}',
+
     '.stats{font-size:11.5px;color:#9a9a9a;margin:0 0 8px}',
-    '.ta{width:100%;min-height:108px;max-height:220px;resize:vertical;border:1px solid rgba(255,255,255,.1);border-radius:11px;',
+    '.ta{width:100%;min-height:104px;max-height:220px;resize:vertical;border:1px solid rgba(255,255,255,.1);border-radius:11px;',
     'background:rgba(0,0,0,.34);color:#e8e8e8;font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;',
     'padding:9px 10px;outline:none;word-break:break-all;transition:border-color .2s,box-shadow .2s}',
     '.ta:focus{border-color:rgba(255,138,61,.85);box-shadow:0 0 0 3px rgba(255,138,61,.16)}',
@@ -203,7 +215,7 @@
     '.btn-pri:disabled{background:#7a4a24;border-color:#7a4a24;color:#cbb6a4}',
 
     '.hint{margin:9px 0 0;font-size:11px;line-height:1.6;color:#7e7e7e}',
-    '.list{margin-top:10px;display:flex;flex-direction:column;gap:6px;max-height:190px;overflow:auto}',
+    '.list{margin-top:10px;display:flex;flex-direction:column;gap:6px;max-height:186px;overflow:auto}',
     '.row{display:flex;align-items:flex-start;gap:8px;padding:7px 9px;border:1px solid rgba(255,255,255,.08);',
     'border-radius:9px;background:rgba(255,255,255,.03)}',
     '.row-main{min-width:0;flex:1}',
@@ -224,7 +236,7 @@
 
     '@media (pointer:coarse){',
     '.launch,.panel{-webkit-backdrop-filter:none;backdrop-filter:none;background:rgba(16,16,16,.96)}',
-    '.btn{min-height:42px}.tab{padding:10px 0}.iconbtn{width:36px;height:36px}}',
+    '.btn{min-height:42px}.tab{padding:10px 0}.iconbtn{width:36px;height:36px}.seg button{min-height:38px}}',
     '@media (prefers-reduced-motion: reduce){.panel.on{animation:none}.ind{transition:none}.btn,.launch{transition:none}}'
   ].join('\n');
 
@@ -235,7 +247,7 @@
     '</button>',
 
     '<section class="panel" role="dialog" aria-label="Cookie 摆渡车">',
-    '<div class="head"><span class="title">Cookie 摆渡车</span><span class="ver">v1.0.0</span>',
+    '<div class="head"><span class="title">Cookie 摆渡车</span><span class="ver">v' + VERSION + '</span>',
     '<span class="host"></span>',
     '<button class="iconbtn close" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>',
 
@@ -244,6 +256,9 @@
     '<button class="tab" data-tab="1">导入</button></div>',
 
     '<div class="body">',
+    '<div class="seg"><button data-mode="cookie" class="is-on">Cookie</button>',
+    '<button data-mode="storage">本地存储</button></div>',
+
     '<div class="pane pane-0">',
     '<div class="stats">尚未读取</div>',
     '<textarea class="ta ta-out" readonly spellcheck="false" placeholder="点下方「读取当前站点」"></textarea>',
@@ -252,7 +267,7 @@
     '<button class="btn copy-json">复制 JSON</button>',
     '<button class="btn copy-b64">复制短码</button>',
     '</div>',
-    '<p class="hint">在<b>已登录的浏览器</b>里点「读取」，把结果复制到另一个浏览器粘贴。</p>',
+    '<p class="hint"></p>',
     '</div>',
 
     '<div class="pane pane-1" hidden>',
@@ -292,10 +307,16 @@
   var hostChip = $('.host'), logEl = $('.log'), toastEl = $('.toast');
   var statsEl = $('.stats'), taOut = $('.ta-out'), taIn = $('.ta-in');
   var listEl = $('.list'), writeBtn = $('.do-write'), reloadBtn = $('.do-reload');
+  var hintEl = $('.hint'), segEl = $('.seg');
 
-  var exportData = [];
+  var mode = 'cookie';
   var items = [];
   var toastTimer = 0;
+
+  var HINT = {
+    cookie: '在已登录的浏览器里点「读取」，把结果复制到另一个浏览器粘贴。cookie 里没有登录凭证时，切到「本地存储」。',
+    storage: '会搬运该站点全部 localStorage / sessionStorage，写入时覆盖目标浏览器同名键。单项超过 128KB 的缓存自动跳过。'
+  };
 
   function log(msg) { logEl.textContent = msg; logEl.title = msg; }
   function toast(msg) {
@@ -317,12 +338,22 @@
     if (!text) { toast('没有内容可复制'); return; }
     try {
       if (typeof GM_setClipboard === 'function') { GM_setClipboard(text, 'text'); toast(msg); return; }
-    } catch (e) { /* 继续降级 */ }
+    } catch (e) { /* 降级 */ }
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(function () { toast(msg); }, function () { fallbackCopy(text, msg); });
-    } else {
-      fallbackCopy(text, msg);
-    }
+    } else fallbackCopy(text, msg);
+  }
+
+  function setMode(m) {
+    mode = m;
+    Array.prototype.forEach.call(segEl.querySelectorAll('button'), function (b) {
+      b.classList.toggle('is-on', b.dataset.mode === m);
+    });
+    hintEl.textContent = HINT[m];
+    taOut.value = '';
+    statsEl.textContent = '尚未读取';
+    items = []; listEl.textContent = ''; updateWriteBtn(); reloadBtn.hidden = true;
+    doRead();
   }
 
   function openPanel(force) {
@@ -331,50 +362,65 @@
       panel.classList.add('on');
       hostChip.textContent = location.host;
       hostChip.title = location.host;
-      if (!exportData.length && !taOut.value) doRead();
-    } else {
-      panel.classList.remove('on');
-    }
+      if (!taOut.value) doRead();
+    } else panel.classList.remove('on');
   }
   function closePanel() { panel.classList.remove('on'); }
 
   /* ---------------- 导出 ---------------- */
 
   async function doRead() {
-    log('读取中…');
+    hintEl.textContent = HINT[mode];
+    if (mode === 'storage') return doReadStorage();
+    log('读取 cookie…');
     try {
       var arr = await collectCookies();
-      exportData = arr.map(function (c) {
+      var data = arr.map(function (c) {
         return {
-          name: c.name,
-          value: c.value == null ? '' : String(c.value),
-          domain: c.domain || location.hostname,
-          path: c.path || '/',
-          secure: !!c.secure,
-          httpOnly: !!c.httpOnly,
-          sameSite: c.sameSite || 'unspecified',
-          session: !!c.session,
-          expirationDate: c.session ? undefined : c.expirationDate,
-          hostOnly: !!c.hostOnly
+          name: c.name, value: c.value == null ? '' : String(c.value),
+          domain: c.domain || location.hostname, path: c.path || '/',
+          secure: !!c.secure, httpOnly: !!c.httpOnly,
+          sameSite: c.sameSite || 'unspecified', session: !!c.session,
+          expirationDate: c.session ? undefined : c.expirationDate, hostOnly: !!c.hostOnly
         };
       });
-      var ho = exportData.filter(function (c) { return c.httpOnly; }).length;
-      var se = exportData.filter(function (c) { return c.session; }).length;
-      statsEl.textContent = exportData.length
-        ? '共 ' + exportData.length + ' 条 · HttpOnly ' + ho + ' 条 · 会话 ' + se + ' 条'
+      var ho = data.filter(function (c) { return c.httpOnly; }).length;
+      var se = data.filter(function (c) { return c.session; }).length;
+      statsEl.textContent = data.length
+        ? '共 ' + data.length + ' 条 · HttpOnly ' + ho + ' 条 · 会话 ' + se + ' 条'
         : '当前站点没有可读 cookie';
-      taOut.value = exportData.length ? JSON.stringify({
-        app: 'cookie-ferry', v: 1, ts: Date.now(), host: location.host, cookies: exportData
-      }) : '';
-      log(exportData.length ? '读取完成，可以复制了' : '读取完成：无 cookie');
-    } catch (e) {
-      log('读取失败：' + e.message);
+      taOut.value = data.length
+        ? JSON.stringify({ app: 'cookie-ferry', v: 1, ts: Date.now(), host: location.host, store: 'cookie', cookies: data })
+        : '';
+      if (!data.length) log('没有 cookie，试试「本地存储」模式');
+      else if (ho === 0 && se === 0) log('读到 ' + data.length + ' 条，但没有 HttpOnly 会话 cookie，登录态可能不在 cookie 里');
+      else log('读取完成，可以复制了');
+    } catch (e) { log('读取失败：' + e.message); }
+  }
+
+  function doReadStorage() {
+    log('读取本地存储…');
+    var res = collectStorageAll();
+    var data = res.items;
+    var l = data.filter(function (x) { return x.t !== 's'; }).length;
+    var s = data.length - l;
+    if (!data.length) {
+      statsEl.textContent = '当前站点没有可导出的本地存储';
+      taOut.value = '';
+      log('读取完成：无数据');
+      return;
     }
+    statsEl.textContent = 'localStorage ' + l + ' 项 · sessionStorage ' + s + ' 项'
+      + (res.skipped ? ' · 跳过超大 ' + res.skipped + ' 项' : '');
+    taOut.value = JSON.stringify({
+      app: 'cookie-ferry', v: 1, ts: Date.now(), host: location.host, store: 'storage', items: data
+    });
+    log('读取完成，共 ' + data.length + ' 项');
   }
 
   /* ---------------- 导入 ---------------- */
 
-  function renderRows() {
+  function renderItems() {
     listEl.textContent = '';
     items.forEach(function (it) {
       var row = document.createElement('div');
@@ -383,15 +429,10 @@
       main.className = 'row-main';
       var t = document.createElement('div');
       t.className = 'row-title';
-      t.textContent = it.cookie.name;
+      t.textContent = it.label;
       var sub = document.createElement('div');
       sub.className = 'row-sub';
-      var flags = [it.cookie.domain || '', it.cookie.path || '/'];
-      if (it.cookie.httpOnly) flags.push('HttpOnly');
-      if (it.cookie.secure) flags.push('Secure');
-      if (it.cookie.sameSite && it.cookie.sameSite !== 'unspecified') flags.push(it.cookie.sameSite);
-      if (it.cookie.session) flags.push('会话');
-      sub.textContent = flags.join(' · ');
+      sub.textContent = it.sub + (it.error ? ' — ' + it.error : '');
       main.appendChild(t); main.appendChild(sub);
       var side = document.createElement('div');
       side.className = 'row-side';
@@ -400,15 +441,45 @@
       badge.textContent = it.status === 'ok' ? '已写入' : it.status === 'bad' ? '失败' : it.error ? '不可写' : '待写入';
       side.appendChild(badge);
       row.appendChild(main); row.appendChild(side);
-      if (it.error) { row.title = it.error; sub.textContent += ' — ' + it.error; }
+      if (it.error) row.title = it.error;
       listEl.appendChild(row);
     });
   }
 
   function updateWriteBtn() {
-    var ready = items.filter(function (i) { return i.details && !i.status; }).length;
+    var ready = items.filter(function (i) { return i.run && !i.status; }).length;
     writeBtn.disabled = ready === 0;
     writeBtn.textContent = ready ? '写入 (' + ready + ')' : '写入';
+  }
+
+  function buildItems(pkg) {
+    if (pkg.store === 'storage' || Array.isArray(pkg.items)) {
+      return (pkg.items || []).map(function (it) {
+        var tag = it.t === 's' ? 's' : 'l';
+        var st = tag === 's' ? sessionStorage : localStorage;
+        var val = it.v == null ? '' : String(it.v);
+        return {
+          label: it.k,
+          sub: (tag === 's' ? 'sessionStorage' : 'localStorage') + ' · ' + val.length + ' 字符',
+          run: function () { st.setItem(it.k, val); }
+        };
+      });
+    }
+    return (pkg.cookies || []).map(function (c) {
+      var built = buildSetDetails(c);
+      var flags = [c.domain || '', c.path || '/'];
+      if (c.httpOnly) flags.push('HttpOnly');
+      if (c.secure) flags.push('Secure');
+      if (c.sameSite && c.sameSite !== 'unspecified') flags.push(c.sameSite);
+      if (c.session) flags.push('会话');
+      return {
+        label: c.name,
+        sub: flags.join(' · '),
+        error: built.error || null,
+        run: built.details ? function () { return setCookie(built.details); } : null,
+        _name: c.name
+      };
+    });
   }
 
   function doAnalyze() {
@@ -416,55 +487,64 @@
     if (!raw) { log('先粘贴内容'); return; }
     var pkg;
     try { pkg = parseInput(raw); } catch (e) { log('解析失败：' + e.message); return; }
-    items = pkg.cookies.map(function (c) {
-      var built = buildSetDetails(c);
-      return { cookie: c, details: built.details || null, error: built.error || null, status: null };
-    });
-    renderRows();
+    items = buildItems(pkg);
+    renderItems();
     updateWriteBtn();
-    var ok = items.filter(function (i) { return i.details; }).length;
-    var from = pkg.host ? '来自 ' + pkg.host + ' ' : '';
-    log(from + '解析到 ' + items.length + ' 条，可写入 ' + ok + ' 条');
     reloadBtn.hidden = true;
+    var ok = items.filter(function (i) { return i.run; }).length;
+    log((pkg.host ? '来自 ' + pkg.host + ' ' : '') + '解析到 ' + items.length + ' 条，可写入 ' + ok + ' 条'
+      + (pkg.store === 'storage' ? '（本地存储）' : '（cookie）'));
     if (ok === 0) toast('没有可写入的条目');
   }
 
   async function doWrite() {
-    if (!HAS_GM_COOKIE) { log('当前油猴管理器不支持 GM_cookie，无法写入 HttpOnly cookie'); return; }
-    var pending = items.filter(function (i) { return i.details && !i.status; });
+    var pending = items.filter(function (i) { return i.run && !i.status; });
     if (!pending.length) return;
+    var isStorage = !!pending[0].label && pending[0].run.length >= 0 && !pending[0]._name;
+    if (!isStorage && !HAS_GM_COOKIE) {
+      log('当前管理器不支持 GM_cookie，无法写入 cookie');
+      return;
+    }
     writeBtn.disabled = true;
     log('写入中…');
     var ok = 0, fail = 0;
     for (var it of pending) {
-      try {
-        await setCookie(it.details);
-        it.status = 'ok'; ok++;
-      } catch (e) {
-        it.status = 'bad'; it.error = e.message; fail++;
-      }
+      try { await it.run(); it.status = 'ok'; ok++; }
+      catch (e) { it.status = 'bad'; it.error = e.message; fail++; }
     }
-    renderRows();
+    renderItems();
     updateWriteBtn();
     reloadBtn.hidden = ok === 0;
 
-    // 回读校验：确认目标站确实能看到这些 cookie
     try {
-      var after = await collectCookies();
-      var names = new Set(after.map(function (c) { return c.name; }));
-      var hit = pending.filter(function (p) { return names.has(p.details.name); }).length;
-      log('写入完成：成功 ' + ok + '，失败 ' + fail + '；回读匹配 ' + hit + '/' + pending.length);
+      if (isStorage) {
+        var now = new Set(collectStorageAll().items.map(function (x) { return x.k; }));
+        var hit = pending.filter(function (p) { return now.has(p.label); }).length;
+        log('写入完成：成功 ' + ok + '，失败 ' + fail + '；回读匹配 ' + hit + '/' + pending.length);
+      } else {
+        var after = await collectCookies();
+        var names = new Set(after.map(function (c) { return c.name; }));
+        var h = pending.filter(function (p) { return names.has(p._name); }).length;
+        log('写入完成：成功 ' + ok + '，失败 ' + fail + '；回读匹配 ' + h + '/' + pending.length);
+      }
     } catch (e) {
       log('写入完成：成功 ' + ok + '，失败 ' + fail);
     }
-    if (ok > 0) toast('已写入 ' + ok + ' 条，建议刷新页面');
+    if (ok > 0) toast('已写入 ' + ok + ' 条，刷新页面生效');
   }
 
-  /* ---------------- 交互绑定 ---------------- */
+  /* ---------------- 绑定 ---------------- */
 
   launch.addEventListener('click', function () { openPanel(); });
   $('.close').addEventListener('click', closePanel);
   $('.do-read').addEventListener('click', doRead);
+
+  Array.prototype.forEach.call(segEl.querySelectorAll('button'), function (b) {
+    b.addEventListener('click', function () {
+      if (b.dataset.mode === mode) return;
+      setMode(b.dataset.mode);
+    });
+  });
 
   $('.copy-json').addEventListener('click', function () { copy(taOut.value, 'JSON 已复制'); });
   $('.copy-b64').addEventListener('click', function () {
@@ -497,8 +577,7 @@
     if (e.key === 'Escape' && panel.classList.contains('on')) closePanel();
   }, true);
 
-  if (!HAS_GM_COOKIE) {
-    log('注意：当前管理器无 GM_cookie，只能读写非 HttpOnly cookie');
-  }
+  hintEl.textContent = HINT.cookie;
+  if (!HAS_GM_COOKIE) log('注意：无 GM_cookie，只能处理非 HttpOnly cookie');
   if (HAS_MENU) GM_registerMenuCommand('打开 Cookie 摆渡车', function () { openPanel(true); });
 })();
